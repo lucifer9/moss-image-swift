@@ -1,0 +1,128 @@
+// Init-time configuration (C9) for the MOSS-Image packages. One configuration type serves both
+// checkpoints; the wrapping package (MossImageSFTPackage / MossImageBasePackage) fixes the variant.
+//
+// Two weight roles, because Base and SFT share every file except the DiT byte-for-byte (LFS sha256
+// checked 2026-10-17): the variant's `transformer/` comes from its own repo, and the Qwen3.5-9B
+// text encoder, tokenizer and FLUX.2 small-decoder VAE always come from the SFT repo, so a machine
+// holding both tiers stores the 16.8 GB encoder once.
+
+import Foundation
+import MLXToolKit
+
+public enum MossImageVariant: String, Codable, Sendable, CaseIterable {
+    case sft, base
+
+    public var repo: String {
+        switch self {
+        case .sft: return "OpenMOSS-Team/MOSS-Image-SFT"
+        case .base: return "OpenMOSS-Team/MOSS-Image-Base"
+        }
+    }
+
+    /// Upstream commits the port was gated against (oracle goldens, AB-T-0307).
+    public var revision: String {
+        switch self {
+        case .sft: return "fc5de0d56fc910cbca6f6625a70f5f582b26deb1"
+        case .base: return "1ceede80badddd6a7812069619edaa5633587192"
+        }
+    }
+}
+
+public struct MossImageConfiguration: PackageConfiguration, ModelStorable, QuantConfigured, WeightSourcing {
+    public var variant: MossImageVariant
+    /// DiT tier. The snapshot is bf16; int8 / int4 quantize the DiT's block Linears on load.
+    public var quant: Quant
+    /// Explicit root holding this variant's `transformer/`. Empty = store.
+    public var snapshotPath: String
+    /// Explicit root holding `text_encoder/`, `tokenizer/`, `vae/` (an SFT snapshot). Empty = store.
+    public var sharedSnapshotPath: String
+    public var defaultSteps: Int
+    public var defaultGuidanceScale: Double
+    /// Keep the 16.8 GB bf16 Qwen3.5-9B encoder resident between requests (big-RAM tiers). Off: it
+    /// loads per request and is released before the denoise loop.
+    public var keepEncoderResident: Bool
+    public var modelsRootDirectory: URL?
+
+    /// The text encoder, tokenizer and VAE source (shared by both variants).
+    public static let sharedRepo = MossImageVariant.sft.repo
+
+    public init(
+        variant: MossImageVariant = .sft,
+        quant: Quant = .bf16,
+        snapshotPath: String = "",
+        sharedSnapshotPath: String = "",
+        defaultSteps: Int = 50,
+        defaultGuidanceScale: Double = 3.0,
+        keepEncoderResident: Bool = false,
+        modelsRootDirectory: URL? = nil
+    ) {
+        self.variant = variant
+        self.quant = quant
+        self.snapshotPath = snapshotPath
+        self.sharedSnapshotPath = sharedSnapshotPath
+        self.defaultSteps = defaultSteps
+        self.defaultGuidanceScale = defaultGuidanceScale
+        self.keepEncoderResident = keepEncoderResident
+        self.modelsRootDirectory = modelsRootDirectory
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case variant, quant, snapshotPath, sharedSnapshotPath, defaultSteps, defaultGuidanceScale, keepEncoderResident
+    }
+
+    public var weightSources: [WeightSource] {
+        [
+            WeightSource(role: "transformer", repo: variant.repo, revision: variant.revision,
+                         matching: ["transformer/*", "model_index.json", "scheduler/*", "LICENSE", "README.md"]),
+            WeightSource(role: "shared", repo: Self.sharedRepo, revision: MossImageVariant.sft.revision,
+                         matching: ["text_encoder/*", "tokenizer/*", "vae/*", "LICENSE"]),
+        ]
+    }
+
+    static func has(_ path: String, _ marker: String) -> Bool {
+        !path.isEmpty && FileManager.default.fileExists(
+            atPath: URL(fileURLWithPath: path).appendingPathComponent(marker).path)
+    }
+
+    /// Explicit paths satisfy their own role; everything else resolves through the store.
+    public func missingWeightSources(storeRoot: URL?) -> [WeightSource] {
+        let fm = FileManager.default
+        let store = ModelStore(root: storeRoot)
+        return weightSources.filter { source in
+            let marker = source.role == "transformer" ? "transformer" : "text_encoder"
+            if source.role == "transformer", Self.has(snapshotPath, marker) { return false }
+            if source.role == "shared", Self.has(sharedSnapshotPath, marker) && Self.has(sharedSnapshotPath, "vae") {
+                return false
+            }
+            guard let dir = Self.storeDirectory(store, repo: source.repo, revision: source.revision, marker: marker)
+            else { return true }
+            return !fm.fileExists(atPath: dir.appendingPathComponent(marker).path)
+        }
+    }
+
+    static func storeDirectory(_ store: ModelStore, repo: String, revision: String?, marker: String) -> URL? {
+        let fm = FileManager.default
+        if let flat = store.directory(for: repo), fm.fileExists(atPath: flat.appendingPathComponent(marker).path) {
+            return flat
+        }
+        if let snap = store.snapshotDirectory(for: repo, revision: revision),
+           fm.fileExists(atPath: snap.appendingPathComponent(marker).path) {
+            return snap
+        }
+        return store.directory(for: repo)
+    }
+
+    /// Root holding this variant's `transformer/`.
+    public func resolvedSnapshotDirectory(storeRoot: URL?) -> URL? {
+        if !snapshotPath.isEmpty { return URL(fileURLWithPath: snapshotPath) }
+        return Self.storeDirectory(ModelStore(root: storeRoot), repo: variant.repo, revision: variant.revision,
+                                   marker: "transformer")
+    }
+
+    /// Root holding `text_encoder/`, `tokenizer/`, `vae/`.
+    public func resolvedSharedDirectory(storeRoot: URL?) -> URL? {
+        if !sharedSnapshotPath.isEmpty { return URL(fileURLWithPath: sharedSnapshotPath) }
+        return Self.storeDirectory(ModelStore(root: storeRoot), repo: Self.sharedRepo,
+                                   revision: MossImageVariant.sft.revision, marker: "text_encoder")
+    }
+}

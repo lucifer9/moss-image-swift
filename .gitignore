@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+goldens/
+outputs/*.png
+outputs/gates/
