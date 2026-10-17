@@ -16,12 +16,20 @@ final class MossImagePackageTests: XCTestCase {
             XCTAssertEqual(m.license.portCodeLicense, .mit)
             XCTAssertEqual(m.contractVersion, ContractVersion.current)
             XCTAssertEqual(m.surfaces.map(\.capability), [.textToImage])
-            XCTAssertEqual(Set(m.requirements.footprints.map(\.quant)), [.bf16, .int8, .int4])
+            XCTAssertEqual(Set(m.requirements.footprints.map(\.quant)), [.bf16, .int8])
             XCTAssertTrue(m.requirements.footprints.allSatisfy { $0.residentBytes > 0 && $0.peakActivationBytes > 0 })
         }
         XCTAssertEqual(MossImageSFTPackage.manifest.surfaces.map(\.name), ["moss-image-sft"])
         XCTAssertEqual(MossImageBasePackage.manifest.surfaces.map(\.name), ["moss-image-base"])
         XCTAssertEqual(MossImageBasePackage.manifest.provenance.sourceRepo, "OpenMOSS-Team/MOSS-Image-Base")
+    }
+
+    /// The measured split (membench, M5 Max): bf16 10.28 / int8 5.61 GB resident, 15.92 GB activation.
+    func testManifestCarriesTheMeasuredSplit() {
+        let fp = MossImageSFTPackage.manifest.requirements.footprints
+        XCTAssertEqual(fp.first { $0.quant == .bf16 }?.residentBytes, 10_500_000_000)
+        XCTAssertEqual(fp.first { $0.quant == .int8 }?.residentBytes, 5_800_000_000)
+        XCTAssertTrue(fp.allSatisfy { $0.peakActivationBytes == 16_500_000_000 })
     }
 
     func testEnvelope() throws {

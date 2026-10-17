@@ -108,8 +108,11 @@ fp32 parity runs with **TF32 off**: the gate sets `MLX_ENABLE_TF32=0` itself. M5
 | DiT Base fp32, same cases | passes with TF32 on, at the TF32 level (4e-4 … 1.9e-3) |
 | DiT SFT bf16 vs fp32 oracle | relL2 1.2e-2 … 2.7e-2 (torch bf16 floor not yet measured) |
 | RoPE table · modulation · head modulation | 1.7e-8 · 5.9e-8 · 6.4e-8 |
-| e2e 8-step 512², SFT fp32 | latents 2.0e-3, image 1.1e-3 |
+| e2e 8-step 512², SFT fp32 | latents 2.0e-3, image 1.1e-3 (torch fp32 on MPS vs CPU: 2.3e-3 / 1.3e-3) |
 | e2e 8-step 512², Base fp32 | latents 1.5e-4, image 5.2e-5 |
+| e2e 8-step 512², SFT bf16 vs fp32 oracle | latents 0.209, image 0.131 — **inside** torch's own bf16 drift (MPS: 0.283 / 0.173) |
+| DiT int8 (bf16 load, quantized), 12 cases | cos 0.9992–0.9999, relL2 1.2e-2 … 4.0e-2 → declared |
+| DiT int4, 12 cases | cos 0.936–0.999 (t500 / t37 fail the ≥ 0.99 gate) → not declared |
 
 **e2e threshold.** The 8-step trajectory amplifies per-forward error ~400× by step 6 (σ 0.791 → 0.671 →
 0.463). The oracle's own fp32 run, with a random 5e-6 relative perturbation per forward, drifts 7.2e-4
@@ -128,11 +131,29 @@ fp32 parity runs with **TF32 off**: the gate sets `MLX_ENABLE_TF32=0` itself. M5
 - 2.27 s/step (two forwards), 113 s denoise, 0.71 s decode.
 - MLX peak 26.2 GB with the encoder co-resident during encoding.
 
+**Footprints** (`MossImageGate membench`, the package's own memory path, MLX pool):
+
+| Tier | Resident | Peak 1024² | Peak 1456² (cap) | Denoise + decode 1024² / 1456² | s/step 1024² (50-step run) |
+|---|---|---|---|---|---|
+| bf16 | 10.28 GB | 26.19 GB | 26.19 GB | 17.40 / 24.66 GB | 2.27 |
+| int8 | 5.61 GB | 21.52 GB | 21.52 GB | 12.73 / 19.99 GB | 2.45 |
+| int4 (not declared) | 3.11 GB | 19.03 GB | 19.03 GB | 10.24 / 17.50 GB | 2.33 |
+
+- The peak is the encode phase everywhere inside the envelope: the per-request 16.8 GB bf16 encoder.
+- Declared: resident 10.5 GB (bf16) and 5.8 GB (int8); activation 16.5 GB.
+- A caller-scope encoder binding kept the encoder alive through denoising (+6 GB at 1024²). It was caught by
+  membench and fixed by scoping the encoder to the conditioning call.
+
+**Renders** (1024², 50 steps, seed 42):
+- int8 matches bf16 at 27.3 dB PSNR (the same image).
+- int4 lands at 18.6 dB: a coherent, text-correct but different image.
+- Base: text correct, less polished composition.
+- A JSON layout prompt (headline, centre circle, date line) follows its boxes exactly.
+
 ## 5. Open
 
-- Footprint measurements per tier (membench) → `MossImageFootprints.declared`, which is currently weight
-  arithmetic.
-- int8 / int4 quality gates.
-- The torch bf16 e2e floor, for the bf16 gate.
+- An int8 Qwen3.5-9B encoder: it would cut the 16.8 GB activation to ~8.5 GB and is the only route to 16 GB
+  Macs. Needs its own quality gate.
+- In-app phys_footprint re-baseline.
 - Tag flux2-vae-mlx-swift 0.4.0 and switch the path dependency.
 - Mirror and publish the weights; registry rows; in-app validation.

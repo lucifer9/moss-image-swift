@@ -30,7 +30,8 @@ public enum MossImageVariant: String, Codable, Sendable, CaseIterable {
 
 public struct MossImageConfiguration: PackageConfiguration, ModelStorable, QuantConfigured, WeightSourcing {
     public var variant: MossImageVariant
-    /// DiT tier. The snapshot is bf16; int8 / int4 quantize the DiT's block Linears on load.
+    /// DiT tier: `.bf16` or `.int8` (the block and text-refiner Linears quantized on load). int4
+    /// is not declared — see MossImageFootprints.
     public var quant: Quant
     /// Explicit root holding this variant's `transformer/`. Empty = store.
     public var snapshotPath: String

@@ -21,11 +21,14 @@ public enum MossImagePackageError: Error, LocalizedError {
     case unreadableSnapshot(String)
     case pngEncode
     case sizeOutOfEnvelope(width: Int, height: Int)
+    case unsupportedQuant(Quant)
 
     public var errorDescription: String? {
         switch self {
         case .unreadableSnapshot(let p): return "MOSS-Image snapshot not readable at \(p)."
         case .pngEncode: return "PNG encoding failed."
+        case .unsupportedQuant(let q):
+            return "MOSS-Image has no \(q) tier (bf16 and int8 are declared; int4 fails the quality gate)."
         case .sizeOutOfEnvelope(let w, let h):
             return "MOSS-Image output \(w)×\(h) is outside the supported envelope "
                 + "(sides multiples of 16, each ≥ 256 px, area ≤ 1456×1456)."
@@ -73,9 +76,9 @@ final class MossImageGenerator {
         let transformer = try MossImageWeights.loadTransformer(
             directory: snapshot.appendingPathComponent("transformer"), dtype: .bfloat16)
         switch c.quant {
+        case .bf16: break
         case .int8: MossImageWeights.quantizeTransformer(transformer, bits: 8)
-        case .int4: MossImageWeights.quantizeTransformer(transformer, bits: 4)
-        default: break
+        default: throw MossImagePackageError.unsupportedQuant(c.quant)
         }
         let vae = try MossImageWeights.loadVAE(directory: shared.appendingPathComponent("vae"), dtype: .float32)
         MLX.Memory.clearCache()

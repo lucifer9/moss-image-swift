@@ -101,11 +101,18 @@ extension MossImageWeights {
          "video_head_modulation", "text_embedder.proj"].contains { path.hasPrefix($0) }
     }
 
-    /// Quantize the DiT's block and text-refiner Linears in place (affine, group 64).
-    public static func quantizeTransformer(_ model: MossImageTransformer, bits: Int, groupSize: Int = 64) {
+    /// Quantize the DiT's block and text-refiner Linears in place (affine). `eightBit`: path
+    /// substrings that stay at 8 bits inside a 4-bit tier (mixed recipe). `MOSS_QUANT_EIGHT_BIT` /
+    /// `MOSS_QUANT_GROUP` override for recipe exploration.
+    public static func quantizeTransformer(_ model: MossImageTransformer, bits: Int, groupSize: Int = 64,
+                                           eightBit: [String] = []) {
+        let env = ProcessInfo.processInfo.environment
+        let keep8 = env["MOSS_QUANT_EIGHT_BIT"].map { $0.split(separator: ",").map(String.init) } ?? eightBit
+        let group = env["MOSS_QUANT_GROUP"].flatMap(Int.init) ?? groupSize
         quantize(model: model, filter: { path, module in
             guard module is Linear, !keepHiPrecision(path: path) else { return nil }
-            return (groupSize, bits, .affine)
+            let b = keep8.contains { path.contains($0) } ? 8 : bits
+            return (group, b, .affine)
         })
         eval(model)
     }

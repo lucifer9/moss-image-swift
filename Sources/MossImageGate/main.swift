@@ -245,8 +245,10 @@ func runE2E() throws {
     // fp32: the trajectory amplifies per-forward error ~400× by step 6 (σ 0.791 → 0.671 → 0.463).
     // The oracle's own fp32 run with a random 5e-6 relative perturbation per forward drifts 7.2e-4
     // (oracle e2e_sensitivity.py); the port's ≤ 5e-6 systematic error lands at 2.0e-3 (SFT) /
-    // 1.5e-4 (Base). Gate 5e-3 latents, 2e-3 image. bf16: against torch's own bf16 trajectory.
-    let limit: Float = dtype == .float32 ? 5e-3 : 5e-2
+    // 1.5e-4 (Base). Gate 5e-3 latents, 2e-3 image. torch fp32 on MPS lands at 2.3e-3 / 1.3e-3 —
+    // the same drift from a different device. bf16: torch's own bf16 trajectory (MPS) drifts 0.283 /
+    // 0.173 from the fp32 oracle and the port 0.209 / 0.131, so the bf16 gate is torch's own drift.
+    let limit: Float = dtype == .float32 ? 5e-3 : 0.30
     let t0 = Date()
     let latents = try withDevice {
         try pipe.denoise(conditioning: c, parameters: p, latents: noise) { i, n, l in
@@ -256,7 +258,7 @@ func runE2E() throws {
     let image = withDevice { pipe.decode(latents) }
     gate("e2e \(variant) 8-step latents (\(String(format: "%.1fs", Date().timeIntervalSince(t0))))",
          compare(latents[0], g["step7.latents"]!), relL2: limit)
-    gate("e2e \(variant) 8-step image", compare(image[0], g["image"]!), relL2: dtype == .float32 ? 2e-3 : limit)
+    gate("e2e \(variant) 8-step image", compare(image[0], g["image"]!), relL2: dtype == .float32 ? 2e-3 : 0.18)
     let out = packageRoot.appendingPathComponent("outputs/e2e_\(variant)_\(dtype == .float32 ? "fp32" : "bf16").png")
     try FileManager.default.createDirectory(at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
     try writePNG(MossImagePipeline.toRGB8(image), to: out)

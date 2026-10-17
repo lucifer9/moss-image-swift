@@ -183,7 +183,9 @@ final class MossBlock: Module {
         let (B, N, D) = (x.dim(0), x.dim(1), x.dim(2))
         let shiftA = m[0..., 0 ..< 1, 0...], scaleA = m[0..., 1 ..< 2, 0...], gateA = m[0..., 2 ..< 3, 0...]
         let shiftF = m[0..., 3 ..< 4, 0...], scaleF = m[0..., 4 ..< 5, 0...], gateF = m[0..., 5 ..< 6, 0...]
-        let dtype = proj.q.weight.dtype
+        // The reference reads proj['q'].weight.dtype; a quantized tier packs that weight as uint32,
+        // so take the (never quantized) norm weight's dtype — the same model dtype.
+        let dtype = norm1.weight.dtype
         let y = (norm1(x) * (1 + scaleA) + shiftA).asType(dtype)
         let q = qNorm(proj.q(y).reshaped(B, N, heads, -1)).reshaped(B, N, D)
         let k = kNorm(proj.k(y).reshaped(B, N, heads, -1)).reshaped(B, N, D)
