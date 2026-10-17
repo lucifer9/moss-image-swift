@@ -10,6 +10,14 @@ import Foundation
 import MLX
 import Tokenizers
 
+/// Text-encoder weight tier. `.int8`: the Linears quantized on load (affine, group 64) — ~half the
+/// 16.8 GB bf16 encoder (gate: PORTING-SPEC §4).
+public enum MossImageTextEncoderQuant: String, Codable, Sendable, CaseIterable {
+    case bf16, int8
+
+    public var bits: Int? { self == .int8 ? 8 : nil }
+}
+
 public final class MossImagePromptEncoder {
     public let model: Qwen35Encoder
     public let tokenizer: any Tokenizers.Tokenizer
@@ -25,9 +33,10 @@ public final class MossImagePromptEncoder {
     }
 
     /// `snapshot` = a MOSS-Image snapshot root (text_encoder/ + tokenizer/).
-    public static func load(snapshot: URL, dtype: DType = .bfloat16) async throws -> MossImagePromptEncoder {
+    public static func load(snapshot: URL, dtype: DType = .bfloat16,
+                            textEncoderQuant: MossImageTextEncoderQuant = .bf16) async throws -> MossImagePromptEncoder {
         let model = try MossImageWeights.loadTextEncoder(
-            directory: snapshot.appendingPathComponent("text_encoder"), dtype: dtype)
+            directory: snapshot.appendingPathComponent("text_encoder"), dtype: dtype, quantBits: textEncoderQuant.bits)
         return MossImagePromptEncoder(model: model, tokenizer: try await loadTokenizer(snapshot: snapshot))
     }
 

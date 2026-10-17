@@ -55,21 +55,24 @@ public enum MossImageEnvelope {
     }
 }
 
-/// Resident DiT + VAE; the 16.8 GB encoder loads per request (released before the denoise loop)
-/// unless `keepEncoderResident`.
+/// Resident DiT + VAE; the encoder (16.8 GB bf16, 9.4 GB int8) loads per request (released before the
+/// denoise loop) unless `keepEncoderResident`.
 @InferenceActor
 final class MossImageGenerator {
     let transformer: MossImageTransformer
     let vae: MossImageVAE
     let sharedSnapshot: URL
     let keepEncoderResident: Bool
+    let textEncoderQuant: MossImageTextEncoderQuant
     private var residentEncoder: MossImagePromptEncoder?
 
-    init(transformer: MossImageTransformer, vae: MossImageVAE, sharedSnapshot: URL, keepEncoderResident: Bool) {
+    init(transformer: MossImageTransformer, vae: MossImageVAE, sharedSnapshot: URL, keepEncoderResident: Bool,
+         textEncoderQuant: MossImageTextEncoderQuant) {
         self.transformer = transformer
         self.vae = vae
         self.sharedSnapshot = sharedSnapshot
         self.keepEncoderResident = keepEncoderResident
+        self.textEncoderQuant = textEncoderQuant
     }
 
     static func load(configuration c: MossImageConfiguration, snapshot: URL, shared: URL) throws -> MossImageGenerator {
@@ -83,20 +86,22 @@ final class MossImageGenerator {
         let vae = try MossImageWeights.loadVAE(directory: shared.appendingPathComponent("vae"), dtype: .float32)
         MLX.Memory.clearCache()
         return MossImageGenerator(transformer: transformer, vae: vae, sharedSnapshot: shared,
-                                  keepEncoderResident: c.keepEncoderResident)
+                                  keepEncoderResident: c.keepEncoderResident, textEncoderQuant: c.textEncoderQuant)
     }
 
     /// Both branches' conditioning. A per-request encoder is created and dropped inside this scope,
     /// so nothing outlives it into the denoise loop (a caller-scope binding kept all 16.8 GB
     /// resident through denoising — measured +6 GB on the 1024² peak before this was scoped).
     private func condition(prompt: String, parameters p: MossImageGenerationParameters) async throws -> MossImageConditioning {
-        if residentEncoder == nil && keepEncoderResident {
-            residentEncoder = try await MossImagePromptEncoder.load(snapshot: sharedSnapshot, dtype: .bfloat16)
-        }
+        if residentEncoder == nil && keepEncoderResident { residentEncoder = try await loadEncoder() }
         var encoder = residentEncoder
-        if encoder == nil { encoder = try await MossImagePromptEncoder.load(snapshot: sharedSnapshot, dtype: .bfloat16) }
+        if encoder == nil { encoder = try await loadEncoder() }
         return try MossImagePipeline(transformer: transformer, promptEncoder: encoder!, vae: vae)
             .encode(prompt: prompt, parameters: p)
+    }
+
+    private func loadEncoder() async throws -> MossImagePromptEncoder {
+        try await MossImagePromptEncoder.load(snapshot: sharedSnapshot, dtype: .bfloat16, textEncoderQuant: textEncoderQuant)
     }
 
     func generate(prompt: String, parameters p: MossImageGenerationParameters) async throws -> (pixels: [UInt8], width: Int, height: Int) {

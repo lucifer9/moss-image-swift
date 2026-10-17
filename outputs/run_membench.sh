@@ -7,5 +7,7 @@ run() { local name=$1; shift; zsh $K/gpu_quiet.sh 4 >&2; echo "=== $name: $*"; $
 run membench_bf16 membench --variant SFT
 run membench_int8 membench --variant SFT --quant int8
 run membench_int4 membench --variant SFT --quant int4
+run membench_bf16_te8 membench --variant SFT --quant-te int8
+run membench_int8_te8 membench --variant SFT --quant int8 --quant-te int8
 run dit_sft_int8 dit --variant SFT --dtype bf16 --quant int8
 run dit_sft_int4 dit --variant SFT --dtype bf16 --quant int4

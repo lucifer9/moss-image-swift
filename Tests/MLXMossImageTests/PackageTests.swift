@@ -5,6 +5,7 @@ import MLXToolKit
 import XCTest
 
 @testable import MLXMossImage
+import MossImage
 
 final class MossImagePackageTests: XCTestCase {
     static let weights = "/Volumes/Satechi/Development/mlxengine-image/weights"
@@ -75,5 +76,32 @@ final class MossImagePackageTests: XCTestCase {
         XCTAssertEqual(back.defaultSteps, 30)
         XCTAssertEqual(back.defaultGuidanceScale, 3.0)
         XCTAssertFalse(back.keepEncoderResident)
+        XCTAssertEqual(back.textEncoderQuant, .bf16)
+        var te8 = cfg
+        te8.textEncoderQuant = .int8
+        let back8 = try JSONDecoder().decode(MossImageConfiguration.self, from: JSONEncoder().encode(te8))
+        XCTAssertEqual(back8.textEncoderQuant, .int8)
+    }
+
+    /// Configurations saved before `textEncoderQuant` existed decode as the bf16 encoder.
+    func testLegacyConfigurationDecodesWithBF16Encoder() throws {
+        let legacy = #"{"variant":"sft","quant":"int8","snapshotPath":"","sharedSnapshotPath":"","defaultSteps":50,"#
+            + #""defaultGuidanceScale":3,"keepEncoderResident":false}"#
+        let c = try JSONDecoder().decode(MossImageConfiguration.self, from: Data(legacy.utf8))
+        XCTAssertEqual(c.quant, .int8)
+        XCTAssertEqual(c.textEncoderQuant, .bf16)
+        XCTAssertNil(c.peakActivationBytesHint)
+    }
+
+    /// The int8 encoder is a lane over either DiT tier: resident stays quant-keyed, activation is hinted.
+    func testInt8EncoderLaneDeclaresItsActivation() {
+        for quant in [Quant.bf16, .int8] {
+            let c = MossImageConfiguration(quant: quant, textEncoderQuant: .int8)
+            XCTAssertNil(c.residentBytesHint)
+            XCTAssertEqual(c.peakActivationBytesHint, MossImageFootprints.int8EncoderPeakActivationBytes)
+        }
+        XCTAssertLessThan(MossImageFootprints.int8EncoderPeakActivationBytes,
+                          MossImageFootprints.declared.map(\.peakActivationBytes).min()!)
+        XCTAssertNil(MossImageConfiguration().peakActivationBytesHint)
     }
 }

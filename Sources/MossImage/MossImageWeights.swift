@@ -32,7 +32,10 @@ public enum MossImageWeights {
         return merged
     }
 
-    static func verifyAndLoad(_ model: Module, _ weights: [String: MLXArray], label: String) throws {
+    /// `evaluate: false` leaves the module holding the lazy loads, so a caller can quantize them
+    /// before anything is materialized (the bf16 copy is then never resident in full).
+    static func verifyAndLoad(_ model: Module, _ weights: [String: MLXArray], label: String,
+                              evaluate: Bool = true) throws {
         let moduleKeys = Set(model.parameters().flattened().map(\.0))
         let fileKeys = Set(weights.keys)
         let missing = moduleKeys.subtracting(fileKeys).sorted()
@@ -46,7 +49,7 @@ public enum MossImageWeights {
                 + unused.prefix(4).joined(separator: ", "))
         }
         model.update(parameters: ModuleParameters.unflattened(weights))
-        eval(model)
+        if evaluate { eval(model) }
     }
 
     /// `transformer/` → MossImageTransformer in `dtype`. `rope.bands` is a derived constant the
@@ -70,13 +73,16 @@ public enum MossImageWeights {
             .replacingOccurrences(of: "time_embedding.2.", with: "time_embedding.linear_2.")
     }
 
-    /// `text_encoder/` → Qwen35Encoder (language model only) in `dtype`.
-    public static func loadTextEncoder(directory: URL, dtype: DType = .bfloat16) throws -> Qwen35Encoder {
+    /// `text_encoder/` → Qwen35Encoder (language model only) in `dtype`; `quantBits` quantizes the
+    /// Linears on load (`quantizeTextEncoder`) straight from the lazy loads, layer by layer.
+    public static func loadTextEncoder(directory: URL, dtype: DType = .bfloat16,
+                                       quantBits: Int? = nil, groupSize: Int = 64) throws -> Qwen35Encoder {
         let config = try Qwen35EncoderConfiguration.load(textEncoderDirectory: directory)
         let model = Qwen35Encoder(config)
         try Device.withDefaultDevice(.cpu) {
-            let state = Qwen35Encoder.sanitize(try loadAllArrays(directory: directory), dtype: dtype)
-            try verifyAndLoad(model, state, label: "text_encoder")
+            try verifyAndLoad(model, Qwen35Encoder.sanitize(try loadAllArrays(directory: directory), dtype: dtype),
+                              label: "text_encoder", evaluate: quantBits == nil)
+            if let quantBits { quantizeTextEncoder(model, bits: quantBits, groupSize: groupSize) }
         }
         return model
     }
@@ -115,5 +121,29 @@ extension MossImageWeights {
             return (group, b, .affine)
         })
         eval(model)
+    }
+
+    /// Encoder layers kept at the load dtype inside a quantized encoder: the GDN decay-gate inputs
+    /// `in_proj_a` / `in_proj_b` (32 outputs each, 0.5 MB per layer — they feed exp(−A·softplus(a + dt))
+    /// and sigmoid(b) for the fp32 delta rule). Everything that is not a Linear — embed_tokens, every
+    /// RMSNorm, conv1d, A_log, dt_bias — is never touched by the filter.
+    static func keepEncoderHiPrecision(path: String) -> Bool {
+        path.hasSuffix(".in_proj_a") || path.hasSuffix(".in_proj_b")
+    }
+
+    /// Quantize the Qwen3.5-9B encoder's Linears in place (affine, `groupSize` along the input dim):
+    /// attention q/k/v/o, GDN in_proj_qkv / in_proj_z / out_proj, and the MLPs. Evaluated one decoder
+    /// layer at a time, so when the model still holds lazy loads (`loadTextEncoder(quantBits:)`) each
+    /// layer's bf16 weights are read, quantized and dropped before the next — the load high-water is
+    /// the quantized model plus one bf16 layer. `MOSS_TE_QUANT_ALL=1` also quantizes in_proj_a/b.
+    public static func quantizeTextEncoder(_ model: Qwen35Encoder, bits: Int, groupSize: Int = 64) {
+        let all = ProcessInfo.processInfo.environment["MOSS_TE_QUANT_ALL"] == "1"
+        quantize(model: model, filter: { path, module in
+            guard module is Linear, all || !keepEncoderHiPrecision(path: path) else { return nil }
+            return (groupSize, bits, .affine)
+        })
+        eval(model.languageModel.embedTokens)
+        eval(model.languageModel.norm)
+        for layer in model.languageModel.layers { eval(layer) }
     }
 }

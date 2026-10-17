@@ -71,11 +71,13 @@ public final class MossImagePipeline {
     /// Load from snapshot roots. Base and SFT share text_encoder/tokenizer/vae byte-for-byte; only
     /// `transformerSnapshot` differs, so a Base install may point `sharedSnapshot` at the SFT root.
     public static func load(transformerSnapshot: URL, sharedSnapshot: URL? = nil,
-                            dtype: DType = .bfloat16) async throws -> MossImagePipeline {
+                            dtype: DType = .bfloat16,
+                            textEncoderQuant: MossImageTextEncoderQuant = .bf16) async throws -> MossImagePipeline {
         let shared = sharedSnapshot ?? transformerSnapshot
         let transformer = try MossImageWeights.loadTransformer(
             directory: transformerSnapshot.appendingPathComponent("transformer"), dtype: dtype)
-        let encoder = try await MossImagePromptEncoder.load(snapshot: shared, dtype: dtype)
+        let encoder = try await MossImagePromptEncoder.load(
+            snapshot: shared, dtype: dtype, textEncoderQuant: textEncoderQuant)
         let vae = try MossImageWeights.loadVAE(directory: shared.appendingPathComponent("vae"), dtype: .float32)
         return MossImagePipeline(transformer: transformer, promptEncoder: encoder, vae: vae)
     }

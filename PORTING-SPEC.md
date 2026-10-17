@@ -85,7 +85,7 @@ encoder, tokenizer and VAE are therefore loaded from the SFT snapshot for both.
 | Target | Contents |
 |---|---|
 | `MossImage` | Core (`Adapted/Qwen35Encoder`, `MossImageTransformer`, `MossImageScheduler`, `MossImagePromptEncoder`, `MossImagePipeline`, `MossImageWeights`). Depends on mlx-swift 0.32.3, mlx-swift-lm 3.32.3 (`gatedDeltaUpdate` only), swift-transformers and flux2-vae-mlx-swift. |
-| `MLXMossImage` | MLXEngine packages `MossImageSFTPackage` (`moss-image-sft`) and `MossImageBasePackage` (`moss-image-base`): T2I, bf16 / int8 / int4 DiT tiers, envelope 256²–1456² by area. |
+| `MLXMossImage` | MLXEngine packages `MossImageSFTPackage` (`moss-image-sft`) and `MossImageBasePackage` (`moss-image-base`): T2I, bf16 / int8 DiT tiers (int4 measured, not declared), bf16 / int8 encoder (`textEncoderQuant`), envelope 256²–1456² by area. |
 | `MossImageGate` | Parity gates (`sched`, `tok`, `vae`, `te`, `te-layers`, `dit`, `e2e`) and `generate` / `membench`. |
 
 **flux2-vae-mlx-swift:** the decoder widths are now read from `vae/config.json` (`decoder_block_out_channels`).
@@ -113,6 +113,7 @@ fp32 parity runs with **TF32 off**: the gate sets `MLX_ENABLE_TF32=0` itself. M5
 | e2e 8-step 512², SFT bf16 vs fp32 oracle | latents 0.209, image 0.131 — **inside** torch's own bf16 drift (MPS: 0.283 / 0.173) |
 | DiT int8 (bf16 load, quantized), 12 cases | cos 0.9992–0.9999, relL2 1.2e-2 … 4.0e-2 → declared |
 | DiT int4, 12 cases | cos 0.936–0.999 (t500 / t37 fail the ≥ 0.99 gate) → not declared |
+| TE int8 (bf16 load, Linears quantized), 4 prompts | relL2 2.1e-2 … 3.3e-2, cos ≥ 0.99944 (gate relL2 ≤ 5e-2, cos ≥ 0.999) → declared |
 
 **e2e threshold.** The 8-step trajectory amplifies per-forward error ~400× by step 6 (σ 0.791 → 0.671 →
 0.463). The oracle's own fp32 run, with a random 5e-6 relative perturbation per forward, drifts 7.2e-4
@@ -150,9 +151,62 @@ fp32 parity runs with **TF32 off**: the gate sets `MLX_ENABLE_TF32=0` itself. M5
 - Base: text correct, less polished composition.
 - A JSON layout prompt (headline, centre circle, date line) follows its boxes exactly.
 
+### 4.1 int8 text encoder (`textEncoderQuant: .int8`)
+
+**Recipe.** `MossImageWeights.quantizeTextEncoder` — affine, group 64, 8 bits, on every Linear of the
+Qwen3.5-9B encoder except the GDN decay-gate inputs `in_proj_a` / `in_proj_b` (32 outputs each, 0.5 MB per
+layer). `embed_tokens`, every RMSNorm, `conv1d`, `A_log` and `dt_bias` are not Linears and are never touched.
+- `loadTextEncoder(quantBits:)` binds the lazy safetensors loads, quantizes, then evaluates one decoder
+  layer at a time. The bf16 copy is never resident in full: the TE gate's process peak is 10.0 GB.
+- Weights: **9.39 GB** (was 16.8 GB). `embed_tokens` is 2.0 GB of that (248 320 × 4096 bf16).
+- Load + quantize: 9–12 s per request.
+
+**Gate** (`MossImageGate te --dtype bf16 --quant-te int8`, vs the fp32 oracle; no torch int8 reference
+exists, so the gate is relL2 ≤ 5e-2 ≈ 2.5× the worst torch bf16 floor, and cos ≥ 0.999):
+
+| Prompt | int8 + bf16 act | int8 + fp32 act | our bf16 | torch bf16 floor |
+|---|---|---|---|---|
+| cat | 2.56e-2 · cos 0.99967 | 1.62e-2 | 1.60e-2 | 1.60e-2 |
+| empty | 3.34e-2 · cos 0.99944 | 2.13e-2 | 1.85e-2 | 2.07e-2 |
+| note (CJK) | 2.09e-2 · cos 0.99978 | 1.43e-2 | 1.21e-2 | 1.18e-2 |
+| layout (JSON) | 2.57e-2 · cos 0.99967 | 1.53e-2 | 2.09e-2 | 1.35e-2 |
+
+- The quantization error alone (fp32 activations) is the size of torch's own bf16 floor. With bf16
+  activations it stacks to 1.3–2.2× the floor.
+- Quantizing `in_proj_a/b` as well (`MOSS_TE_QUANT_ALL=1`) changes nothing measurable (2.0–3.3e-2). They
+  stay bf16 because they cost nothing.
+
+**End to end** (fridge prompt, 1024², 50 steps, seed 42, PSNR vs the bf16-DiT / bf16-encoder render):
+
+| DiT / encoder | PSNR | Note text |
+|---|---|---|
+| int8 / bf16 (before) | 27.34 dB | exact |
+| bf16 / int8 | 31.09 dB | exact |
+| int8 / int8 | 27.13 dB (35.85 dB vs int8 / bf16) | exact |
+
+The encoder costs less than the DiT tier does: int8 / int8 is the same image as int8 / bf16. All three Chinese lines
+render exactly in every arm (`outputs/note_crops_te_int8.png`).
+
+**Footprints** (membench, int8 encoder):
+
+| DiT | Resident | Peak 1024² (encode / denoise+decode) | Peak 1456² (cap) | Activation at the cap |
+|---|---|---|---|---|
+| bf16 | 10.28 GB | 20.09 GB (20.09 / 17.40) | 24.66 GB (denoise) | 14.39 GB |
+| int8 | 5.61 GB | 15.42 GB (15.42 / 12.73) | 19.99 GB (denoise) | 14.39 GB |
+
+- With the int8 encoder the encode phase is no longer the peak at the cap; the 1456² denoise is.
+- The lane is declared as `FootprintConfigured.peakActivationBytesHint` = **14.9 GB** (+3.6%) over either DiT
+  tier, and resident stays keyed on the DiT quant.
+- So the declared activation drops only 16.5 → 14.9 GB. The 6.1 GB the encoder saves at 1024² would show in
+  admission only with a lower envelope cap. At 1024², int8 / int8 peaks at 15.42 GB
+  (was 21.52 GB) and bf16 / int8 at 20.09 GB (was 26.19 GB).
+
 ## 5. Open
 
-- An int8 Qwen3.5-9B encoder: it would cut the 16.8 GB activation to ~8.5 GB and is the only route to 16 GB
-  Macs. Needs its own quality gate.
+- 16 GB Macs: the int8 / int8 lane still declares 5.8 + 14.9 GB because the 1456² denoise sets the
+  activation. Admitting a 16 GB Mac needs a ≤ 1024² envelope lane (or activation scaling that admission
+  honours). A further ~1 GB would come from quantizing `embed_tokens`.
+- Ship pre-quantized int8 encoder weights: that removes the 9–12 s per-request quantize and the 16.8 GB
+  download.
 - In-app phys_footprint re-baseline.
 - Mirror and publish the weights; registry rows; in-app validation.

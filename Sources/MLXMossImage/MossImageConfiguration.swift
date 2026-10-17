@@ -12,6 +12,7 @@
 
 import Foundation
 import MLXToolKit
+import MossImage
 
 public enum MossImageVariant: String, Codable, Sendable, CaseIterable {
     case sft, base
@@ -48,7 +49,8 @@ public enum MossImageVariant: String, Codable, Sendable, CaseIterable {
     }
 }
 
-public struct MossImageConfiguration: PackageConfiguration, ModelStorable, QuantConfigured, WeightSourcing {
+public struct MossImageConfiguration: PackageConfiguration, ModelStorable, QuantConfigured, FootprintConfigured,
+    WeightSourcing {
     public var variant: MossImageVariant
     /// DiT tier: `.bf16` or `.int8` (the block and text-refiner Linears quantized on load). int4
     /// is not declared — see MossImageFootprints.
@@ -62,6 +64,10 @@ public struct MossImageConfiguration: PackageConfiguration, ModelStorable, Quant
     /// Keep the 16.8 GB bf16 Qwen3.5-9B encoder resident between requests (big-RAM tiers). Off: it
     /// loads per request and is released before the denoise loop.
     public var keepEncoderResident: Bool
+    /// Qwen3.5-9B encoder tier, orthogonal to the DiT `quant`. `.int8` quantizes its Linears on load
+    /// (9.4 GB instead of 16.8 GB); it changes the activation peak, which `peakActivationBytesHint`
+    /// declares (MossImageFootprints.int8EncoderPeakActivationBytes).
+    public var textEncoderQuant: MossImageTextEncoderQuant
     public var modelsRootDirectory: URL?
 
     /// The text encoder, tokenizer and VAE source (shared by both variants).
@@ -75,6 +81,7 @@ public struct MossImageConfiguration: PackageConfiguration, ModelStorable, Quant
         defaultSteps: Int = 50,
         defaultGuidanceScale: Double = 3.0,
         keepEncoderResident: Bool = false,
+        textEncoderQuant: MossImageTextEncoderQuant = .bf16,
         modelsRootDirectory: URL? = nil
     ) {
         self.variant = variant
@@ -84,11 +91,33 @@ public struct MossImageConfiguration: PackageConfiguration, ModelStorable, Quant
         self.defaultSteps = defaultSteps
         self.defaultGuidanceScale = defaultGuidanceScale
         self.keepEncoderResident = keepEncoderResident
+        self.textEncoderQuant = textEncoderQuant
         self.modelsRootDirectory = modelsRootDirectory
     }
 
     private enum CodingKeys: String, CodingKey {
-        case variant, quant, snapshotPath, sharedSnapshotPath, defaultSteps, defaultGuidanceScale, keepEncoderResident
+        case variant, quant, snapshotPath, sharedSnapshotPath, defaultSteps, defaultGuidanceScale, keepEncoderResident,
+             textEncoderQuant
+    }
+
+    /// `textEncoderQuant` is optional on decode, so configurations saved before it existed still load (bf16).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        variant = try c.decode(MossImageVariant.self, forKey: .variant)
+        quant = try c.decode(Quant.self, forKey: .quant)
+        snapshotPath = try c.decode(String.self, forKey: .snapshotPath)
+        sharedSnapshotPath = try c.decode(String.self, forKey: .sharedSnapshotPath)
+        defaultSteps = try c.decode(Int.self, forKey: .defaultSteps)
+        defaultGuidanceScale = try c.decode(Double.self, forKey: .defaultGuidanceScale)
+        keepEncoderResident = try c.decode(Bool.self, forKey: .keepEncoderResident)
+        textEncoderQuant = try c.decodeIfPresent(MossImageTextEncoderQuant.self, forKey: .textEncoderQuant) ?? .bf16
+        modelsRootDirectory = nil
+    }
+
+    /// The DiT tier keys the resident bytes (QuantFootprint); the encoder tier only moves the activation.
+    public var residentBytesHint: UInt64? { nil }
+    public var peakActivationBytesHint: UInt64? {
+        textEncoderQuant == .int8 ? MossImageFootprints.int8EncoderPeakActivationBytes : nil
     }
 
     public var weightSources: [WeightSource] {

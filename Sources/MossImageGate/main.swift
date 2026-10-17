@@ -2,11 +2,12 @@
 // goldens, fp32 CPU torch) and real generations. Every Metal-context gate is a CLI mode (the SPM
 // test product's metallib is the fragile context).
 //
-//   MossImageGate sched | tok | vae [--cpu] | te [--dtype f32|bf16] [--cpu]
+//   MossImageGate sched | tok | vae [--cpu] | te [--dtype f32|bf16] [--quant-te int8] [--cpu]
 //                 dit [--variant SFT|Base] [--dtype f32|bf16] [--cpu]
 //                 e2e [--variant SFT|Base] [--dtype f32|bf16] [--cpu]
 //                 generate --prompt "…" [--variant SFT|Base] [--size 1024x1024] [--steps 50]
-//                          [--cfg 3] [--seed 42] [--no-skip] [--release-te] [--out file.png]
+//                          [--cfg 3] [--seed 42] [--no-skip] [--quant int8] [--quant-te int8] [--out file.png]
+//                 membench [--variant SFT|Base] [--quant int8] [--quant-te int8] [--sizes 1024x1024,…]
 // Paths: --weights <dir with MOSS-Image-SFT/ and MOSS-Image-Base/>, --goldens <oracle goldens dir>.
 
 import CoreGraphics
@@ -42,6 +43,7 @@ let goldensRoot = URL(fileURLWithPath: opt("--goldens")
 let variant = opt("--variant") ?? "SFT"
 let dtype: DType = (opt("--dtype") ?? "f32") == "bf16" ? .bfloat16 : .float32
 let quantBits: Int? = opt("--quant").flatMap { $0 == "int8" ? 8 : $0 == "int4" ? 4 : nil }
+let teQuant = opt("--quant-te").flatMap(MossImageTextEncoderQuant.init(rawValue:)) ?? .bf16
 let sftSnapshot = weightsRoot.appendingPathComponent("MOSS-Image-SFT")
 let variantSnapshot = weightsRoot.appendingPathComponent("MOSS-Image-\(variant)")
 
@@ -142,10 +144,13 @@ func runVAE() throws {
 
 func runTE() throws {
     let g = try golden("shared", "te")
+    let t0 = Date()
     let encoder = try MossImageWeights.loadTextEncoder(
-        directory: sftSnapshot.appendingPathComponent("text_encoder"), dtype: dtype)
+        directory: sftSnapshot.appendingPathComponent("text_encoder"), dtype: dtype, quantBits: teQuant.bits)
+    print(String(format: "      te load %.1fs, weights %.2f GB (MLX active)", Date().timeIntervalSince(t0),
+                 Double(MLX.GPU.activeMemory) / 1e9))
     let tokens = try golden("shared", "tok")
-    let tag = dtype == .float32 ? "fp32" : "bf16"
+    let tag = (dtype == .float32 ? "fp32" : "bf16") + (teQuant == .bf16 ? "" : " \(teQuant.rawValue)")
     for name in promptNames {
         let ids = tokens["\(name).ids"]!.reshaped(1, -1)
         let t0 = Date()
@@ -155,10 +160,13 @@ func runTE() throws {
         for li in [1, 4, 16] {
             print("      te \(name) layer\(li): \(compare(captured[li]![0], g["\(name).hidden\(li).fp32"]!))")
         }
-        let limit: Float = dtype == .float32 ? 1e-3 : 3e-2
-        gate("te \(name) last_hidden \(tag) (\(String(format: "%.2fs", secs)))", compare(h[0], g["\(name).fp32"]!),
-             relL2: limit)
-        if dtype == .bfloat16 {
+        // int8: no torch int8 reference exists; the gate is cos ≥ 0.999 with relL2 ≤ 5e-2 (≈ 2.5× the
+        // worst torch bf16 floor), and each prompt is printed against that floor.
+        let limit: Float = teQuant == .int8 ? 5e-2 : dtype == .float32 ? 1e-3 : 3e-2
+        let s = compare(h[0], g["\(name).fp32"]!)
+        if teQuant == .int8, s.cos < 0.999 { failures += 1; print("FAIL  te \(name) cos \(s.cos) < 0.999") }
+        gate("te \(name) last_hidden \(tag) (\(String(format: "%.2fs", secs)))", s, relL2: limit)
+        if dtype == .bfloat16 || teQuant != .bf16 {
             print("      te \(name) torch-bf16 floor vs fp32: \(compare(g["\(name).bf16"]!, g["\(name).fp32"]!))")
         }
     }
@@ -281,7 +289,7 @@ func runGenerate() async throws {
     let modelDType: DType = (opt("--dtype") ?? "bf16") == "f32" ? .float32 : .bfloat16
     let t0 = Date()
     let pipe = try await MossImagePipeline.load(
-        transformerSnapshot: variantSnapshot, sharedSnapshot: sftSnapshot, dtype: modelDType)
+        transformerSnapshot: variantSnapshot, sharedSnapshot: sftSnapshot, dtype: modelDType, textEncoderQuant: teQuant)
     if let quantBits { MossImageWeights.quantizeTransformer(pipe.transformer, bits: quantBits) }
     log("loaded in \(String(format: "%.1fs", Date().timeIntervalSince(t0)))")
     let t1 = Date()
@@ -318,7 +326,8 @@ func runMembench() async throws {
     let vae = try MossImageWeights.loadVAE(directory: sftSnapshot.appendingPathComponent("vae"))
     MLX.GPU.clearCache()
     let resident = Double(MLX.GPU.activeMemory) / 1e9
-    print(String(format: "membench %@ %@: resident %.2f GB", variant, opt("--quant") ?? "bf16", resident))
+    print(String(format: "membench %@ %@ te-%@: resident %.2f GB", variant, opt("--quant") ?? "bf16",
+                 teQuant.rawValue, resident))
     for wh in sizes {
         MLX.GPU.resetPeakMemory()
         var p = MossImageGenerationParameters()
@@ -326,7 +335,10 @@ func runMembench() async throws {
         let prompt = (try? promptText("layout")) ?? "A cat"
         // As the package: the encoder lives only inside this closure.
         let c = try await { () async throws -> MossImageConditioning in
-            let encoder = try await MossImagePromptEncoder.load(snapshot: sftSnapshot, dtype: .bfloat16)
+            let t0 = Date()
+            let encoder = try await MossImagePromptEncoder.load(
+                snapshot: sftSnapshot, dtype: .bfloat16, textEncoderQuant: teQuant)
+            print(String(format: "  encoder load %.1fs", Date().timeIntervalSince(t0)))
             return try MossImagePipeline(transformer: transformer, promptEncoder: encoder, vae: vae)
                 .encode(prompt: prompt, parameters: p)
         }()
