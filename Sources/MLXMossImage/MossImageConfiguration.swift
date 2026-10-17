@@ -5,6 +5,10 @@
 // checked 2026-10-17): the variant's `transformer/` comes from its own repo, and the Qwen3.5-9B
 // text encoder, tokenizer and FLUX.2 small-decoder VAE always come from the SFT repo, so a machine
 // holding both tiers stores the 16.8 GB encoder once.
+//
+// Weights materialize from the mlx-community mirrors (fleet durability policy: a namespace we
+// publish to, pinned by commit). Every weight / config / tokenizer file in them is byte-identical
+// to the upstream OpenMOSS revision (LFS sha256 compared after upload, 2026-10-17).
 
 import Foundation
 import MLXToolKit
@@ -12,7 +16,23 @@ import MLXToolKit
 public enum MossImageVariant: String, Codable, Sendable, CaseIterable {
     case sft, base
 
+    /// The mlx-community mirror the weights materialize from.
     public var repo: String {
+        switch self {
+        case .sft: return "mlx-community/MOSS-Image-SFT-bf16"
+        case .base: return "mlx-community/MOSS-Image-Base-bf16"
+        }
+    }
+
+    /// Mirror commit (pinned; the mirror is byte-identical to `upstreamRevision`).
+    public var revision: String {
+        switch self {
+        case .sft: return "ea698e99312015505884559ebad94b4a5a0d0753"
+        case .base: return "56e5c1f98640356efce285957df9a883a53064fa"
+        }
+    }
+
+    public var upstreamRepo: String {
         switch self {
         case .sft: return "OpenMOSS-Team/MOSS-Image-SFT"
         case .base: return "OpenMOSS-Team/MOSS-Image-Base"
@@ -20,7 +40,7 @@ public enum MossImageVariant: String, Codable, Sendable, CaseIterable {
     }
 
     /// Upstream commits the port was gated against (oracle goldens, AB-T-0307).
-    public var revision: String {
+    public var upstreamRevision: String {
         switch self {
         case .sft: return "fc5de0d56fc910cbca6f6625a70f5f582b26deb1"
         case .base: return "1ceede80badddd6a7812069619edaa5633587192"
@@ -74,7 +94,7 @@ public struct MossImageConfiguration: PackageConfiguration, ModelStorable, Quant
     public var weightSources: [WeightSource] {
         [
             WeightSource(role: "transformer", repo: variant.repo, revision: variant.revision,
-                         matching: ["transformer/*", "model_index.json", "scheduler/*", "LICENSE", "README.md"]),
+                         matching: ["transformer/*", "model_index.json", "scheduler/*", "LICENSE"]),
             WeightSource(role: "shared", repo: Self.sharedRepo, revision: MossImageVariant.sft.revision,
                          matching: ["text_encoder/*", "tokenizer/*", "vae/*", "LICENSE"]),
         ]

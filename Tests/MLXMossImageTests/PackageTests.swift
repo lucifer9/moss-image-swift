@@ -21,7 +21,8 @@ final class MossImagePackageTests: XCTestCase {
         }
         XCTAssertEqual(MossImageSFTPackage.manifest.surfaces.map(\.name), ["moss-image-sft"])
         XCTAssertEqual(MossImageBasePackage.manifest.surfaces.map(\.name), ["moss-image-base"])
-        XCTAssertEqual(MossImageBasePackage.manifest.provenance.sourceRepo, "OpenMOSS-Team/MOSS-Image-Base")
+        XCTAssertEqual(MossImageBasePackage.manifest.provenance.sourceRepo, "mlx-community/MOSS-Image-Base-bf16")
+        XCTAssertEqual(MossImageVariant.base.upstreamRepo, "OpenMOSS-Team/MOSS-Image-Base")
     }
 
     /// The measured split (membench, M5 Max): bf16 10.28 / int8 5.61 GB resident, 15.92 GB activation.
@@ -44,8 +45,10 @@ final class MossImagePackageTests: XCTestCase {
 
     func testBaseSharesTheSFTEncoderAndVAE() {
         let base = MossImageConfiguration(variant: .base)
-        XCTAssertEqual(base.weightSources.first { $0.role == "transformer" }?.repo, "OpenMOSS-Team/MOSS-Image-Base")
-        XCTAssertEqual(base.weightSources.first { $0.role == "shared" }?.repo, "OpenMOSS-Team/MOSS-Image-SFT")
+        XCTAssertEqual(base.weightSources.first { $0.role == "transformer" }?.repo, "mlx-community/MOSS-Image-Base-bf16")
+        XCTAssertEqual(base.weightSources.first { $0.role == "shared" }?.repo, "mlx-community/MOSS-Image-SFT-bf16")
+        // Pinned mirror commits, never a moving "main".
+        XCTAssertTrue(base.weightSources.allSatisfy { ($0.revision ?? "").count == 40 })
         XCTAssertEqual(base.weightSources.first { $0.role == "shared" }?.matching,
                        ["text_encoder/*", "tokenizer/*", "vae/*", "LICENSE"])
     }
