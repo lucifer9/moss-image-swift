@@ -90,7 +90,7 @@ encoder, tokenizer and VAE are therefore loaded from the SFT snapshot for both.
 
 **flux2-vae-mlx-swift:** the decoder widths are now read from `vae/config.json` (`decoder_block_out_channels`).
 - The full decoder stays the default, so Klein, Lens and ERNIE are unchanged.
-- Until that change is tagged, this package depends on it by local path.
+- Tagged v0.4.0; this package depends on it by URL.
 
 ## 4. Gate results (M5 Max, mlx-swift 0.32.3)
 
@@ -101,7 +101,7 @@ fp32 parity runs with **TF32 off**: the gate sets `MLX_ENABLE_TF32=0` itself. M5
 |---|---|
 | sched (4, 8, 20, 30, 50 steps) | bit-exact |
 | tok (4 prompts incl. empty, CJK, JSON layout) | ids exact |
-| VAE small decoder, fp32 | relL2 1.8e-4 (exact conv route) · 3.5e-3 (default route) |
+| VAE small decoder, fp32 | relL2 1.2e-6 (exact conv route) · 3.6e-6 (default route); TF32 on: 1.8e-4 · 3.5e-3 |
 | TE fp32, all 32 layers ('cat') | layer 0: 7e-7 … last_hidden: 4.8e-6 |
 | TE bf16 vs fp32 oracle | 1.2–2.1e-2, the same as torch's own bf16 floor (1.2–2.1e-2) |
 | DiT SFT fp32, 12 cases (t 999 / 500 / 37 × cat / empty × skip-22) | relL2 1.1e-6 … 5.3e-6 |
@@ -155,5 +155,4 @@ fp32 parity runs with **TF32 off**: the gate sets `MLX_ENABLE_TF32=0` itself. M5
 - An int8 Qwen3.5-9B encoder: it would cut the 16.8 GB activation to ~8.5 GB and is the only route to 16 GB
   Macs. Needs its own quality gate.
 - In-app phys_footprint re-baseline.
-- Tag flux2-vae-mlx-swift 0.4.0 and switch the path dependency.
 - Mirror and publish the weights; registry rows; in-app validation.
