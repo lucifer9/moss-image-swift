@@ -1,5 +1,24 @@
 // Declared memory footprints (efficiency contract 1.14.0 split: resident + peak activation).
-// MEASURED with `MossImageGate membench` (M5 Max, mlx-swift 0.32.3, Release, 2026-10-17), the
+//
+// 0.2.1 (AB-T-0317, in-app AB-R-0575): declared activation 17.5 GB on EVERY lane, from the Pixel Agency Image
+// Engine's phys_footprint, not the MLX pool. At the 1456² cap the per-request peak is the VAE decode, 16.84 GB over
+// resident on both DiT tiers and with either encoder (the decode doesn't see the encoder): 27.28 GB phys on the bf16
+// DiT, 22.61 GB on int8. 16.84 GB + 3.6 % = 17.45 → 17.5 GB. Below the cap the bf16-encoder encode stays the peak
+// (in-app 26.45–26.53 GB bf16, 21.82–21.87 GB int8 at 1024², AB-R-0570), still under the declaration. The 0.2.1
+// in-app re-run (bf16/bf16 + int8/int8, AB-T-0317) put bf16/bf16 at 27.28 GB at the cap, as with the int8 encoder.
+// The int8 encoder lowers the peak only below the cap (6.1 GB at 1024²), so it no longer declares its own activation: the
+// 0.2.0 `peakActivationBytesHint` (14.9 GB, the pool's 1456² denoise) was 1.9 GB under the real cap peak.
+//
+//   lane (in-app phys)      resident   peak 1024²          peak 1456² (cap)    declared 0.2.1
+//   bf16 DiT + bf16 TE      10.43 GB   26.45 GB (encode)   27.28 GB (decode)   10.5 + 17.5 = 28.0 GB
+//   bf16 DiT + int8 TE      10.44 GB   20.38 GB (encode)   27.28 GB (decode)   10.5 + 17.5 = 28.0 GB
+//   int8 DiT + bf16 TE       5.6 GB    21.87 GB (encode)   ≈22.6 GB (decode)    5.8 + 17.5 = 23.3 GB  (cap not run)
+//   int8 DiT + int8 TE       5.77 GB   15.73 GB (encode)   22.62 GB (decode)    5.8 + 17.5 = 23.3 GB
+//
+// The `membench` MLX-pool figure at the cap (24.66 GB on bf16) understates phys there by 2.6 GB; the 0.2.0 notes
+// below are kept as the pool record.
+//
+// 0.2.0 pool record. MEASURED with `MossImageGate membench` (M5 Max, mlx-swift 0.32.3, Release, 2026-10-17), the
 // package's own memory path: DiT (bf16 / quantized on load) + fp32 VAE resident; per request the
 // bf16 Qwen3.5-9B encoder loads, encodes positive + empty negative inside a scope, is released,
 // then denoise (both CFG forwards) and decode.
@@ -33,16 +52,14 @@
 // With the int8 encoder the encode phase stops being the peak at the cap: the 1456² denoise is
 // (activation 14.39 GB on both DiT tiers). Declared activation 14.9 GB (+3.6%) as a
 // `peakActivationBytesHint`, so the lane saves 1.6 GB of declared activation — the 6.1 GB it saves
-// at 1024² only shows in admission with a lower envelope cap.
+// at 1024² only shows in admission with a lower envelope cap. [Superseded in 0.2.1: the in-app cap peak is the
+// decode, 16.84 GB phys over resident, so the hint was 1.9 GB short.]
 
 import MLXToolKit
 
 enum MossImageFootprints {
     static let declared: [QuantFootprint] = [
-        QuantFootprint(quant: .bf16, residentBytes: 10_500_000_000, peakActivationBytes: 16_500_000_000),
-        QuantFootprint(quant: .int8, residentBytes: 5_800_000_000, peakActivationBytes: 16_500_000_000),
+        QuantFootprint(quant: .bf16, residentBytes: 10_500_000_000, peakActivationBytes: 17_500_000_000),
+        QuantFootprint(quant: .int8, residentBytes: 5_800_000_000, peakActivationBytes: 17_500_000_000),
     ]
-
-    /// The int8-encoder lane's activation (FootprintConfigured hint): the 1456² denoise, 14.39 GB.
-    static let int8EncoderPeakActivationBytes: UInt64 = 14_900_000_000
 }

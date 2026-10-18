@@ -201,12 +201,34 @@ render exactly in every arm (`outputs/note_crops_te_int8.png`).
   admission only with a lower envelope cap. At 1024², int8 / int8 peaks at 15.42 GB
   (was 21.52 GB) and bf16 / int8 at 20.09 GB (was 26.19 GB).
 
+### 4.2 In-app re-declaration (0.2.1, AB-T-0317)
+
+Pixel Agency Image Engine 0.2.13 (Release), built against a local mlx-image-runtime on this package; MES
+`image.generate`, the bookstore poster at seed 7, 50 steps, CFG 3; `phys_footprint` ledger peak
+(`WIP/moss-image-inapp/run-lanes.sh`, AB-R-0575 method).
+
+| Lane (DiT / encoder) | Resident | Peak 1024² | Peak 1456² (cap) | Declared 0.2.1 |
+|---|---|---|---|---|
+| bf16 / bf16 | 10.43 GB | 26.45 GB (encode) | 27.28 GB (decode) | 10.5 + 17.5 = 28.0 GB |
+| bf16 / int8 (AB-R-0575) | 10.44 GB | 20.38 GB | 27.28 GB | 28.0 GB |
+| int8 / bf16 (AB-R-0570) | 5.6 GB | 21.87 GB | not run (≈22.6 GB) | 5.8 + 17.5 = 23.3 GB |
+| int8 / int8 | 5.77 GB | 15.73 GB (encode) | 22.62 GB (decode) | 23.3 GB |
+
+- At the cap the VAE decode is the peak: 16.84 GB phys over resident on every lane. The decode doesn't depend on
+  the encoder: bf16/bf16 and bf16/int8 both peak at 27.28 GB.
+- The MLX pool (membench) understated it by 2.6 GB, so 0.2.0 under-declared every lane at the cap.
+- **Declared activation is 17.5 GB on every lane** (16.84 GB + 3.6 %). The int8 encoder's 14.9 GB
+  `peakActivationBytesHint` is gone, and every lane uses the quant-keyed footprint.
+- Outputs are byte-identical to 0.2.0 (declaration-only change); every string in the 1456² bf16 render is exact.
+- The int8 encoder still lowers the peak by 6.1 GB below the cap. Admission would see it only with per-size footprints
+  or a lower cap.
+
 ## 5. Open
 
-- 16 GB Macs: the int8 / int8 lane still declares 5.8 + 14.9 GB because the 1456² denoise sets the
-  activation. Admitting a 16 GB Mac needs a ≤ 1024² envelope lane (or activation scaling that admission
-  honours). A further ~1 GB would come from quantizing `embed_tokens`.
+- 16 GB Macs: the int8 / int8 lane declares 5.8 + 17.5 GB because the 1456² decode sets the activation.
+  Admitting a 16 GB Mac needs a ≤ 1024² envelope lane (or activation scaling that admission honours). A further ~1 GB would come from quantizing `embed_tokens`.
 - Ship pre-quantized int8 encoder weights: that removes the 9–12 s per-request quantize and the 16.8 GB
   download.
-- In-app phys_footprint re-baseline.
+- A memory-bounded VAE decode (flux2-vae-mlx-swift ≥ 0.6.0 `decodePackedLatents(..., tile: .standard)`) would
+  take the cap peak under the encode peak; needs a parity check and an in-app re-measure.
 - Mirror and publish the weights; registry rows; in-app validation.

@@ -26,12 +26,12 @@ final class MossImagePackageTests: XCTestCase {
         XCTAssertEqual(MossImageVariant.base.upstreamRepo, "OpenMOSS-Team/MOSS-Image-Base")
     }
 
-    /// The measured split (membench, M5 Max): bf16 10.28 / int8 5.61 GB resident, 15.92 GB activation.
+    /// The declared split: bf16 10.5 / int8 5.8 GB resident, 17.5 GB activation (the in-app 1456² decode, AB-R-0575).
     func testManifestCarriesTheMeasuredSplit() {
         let fp = MossImageSFTPackage.manifest.requirements.footprints
         XCTAssertEqual(fp.first { $0.quant == .bf16 }?.residentBytes, 10_500_000_000)
         XCTAssertEqual(fp.first { $0.quant == .int8 }?.residentBytes, 5_800_000_000)
-        XCTAssertTrue(fp.allSatisfy { $0.peakActivationBytes == 16_500_000_000 })
+        XCTAssertTrue(fp.allSatisfy { $0.peakActivationBytes == 17_500_000_000 })
     }
 
     func testEnvelope() throws {
@@ -93,15 +93,23 @@ final class MossImagePackageTests: XCTestCase {
         XCTAssertNil(c.peakActivationBytesHint)
     }
 
-    /// The int8 encoder is a lane over either DiT tier: resident stays quant-keyed, activation is hinted.
-    func testInt8EncoderLaneDeclaresItsActivation() {
+    /// The int8 encoder is a lane over either DiT tier, and the cap peak (the VAE decode) doesn't depend on it,
+    /// so every lane falls through to the quant-keyed footprint (AB-T-0317).
+    func testInt8EncoderLaneUsesTheQuantKeyedFootprint() {
         for quant in [Quant.bf16, .int8] {
             let c = MossImageConfiguration(quant: quant, textEncoderQuant: .int8)
             XCTAssertNil(c.residentBytesHint)
-            XCTAssertEqual(c.peakActivationBytesHint, MossImageFootprints.int8EncoderPeakActivationBytes)
+            XCTAssertNil(c.peakActivationBytesHint)
         }
-        XCTAssertLessThan(MossImageFootprints.int8EncoderPeakActivationBytes,
-                          MossImageFootprints.declared.map(\.peakActivationBytes).min()!)
         XCTAssertNil(MossImageConfiguration().peakActivationBytesHint)
+    }
+
+    /// Declared resident + activation covers the in-app phys peak at 1024² and the 1456² cap (AB-R-0570, AB-R-0575).
+    func testDeclaredFootprintCoversInAppPeaks() {
+        let measuredPeak: [Quant: UInt64] = [.bf16: 27_280_000_000, .int8: 22_610_000_000]
+        for f in MossImageFootprints.declared {
+            XCTAssertGreaterThanOrEqual(f.residentBytes + f.peakActivationBytes, measuredPeak[f.quant]!)
+            XCTAssertGreaterThanOrEqual(f.peakActivationBytes, 16_840_000_000)
+        }
     }
 }

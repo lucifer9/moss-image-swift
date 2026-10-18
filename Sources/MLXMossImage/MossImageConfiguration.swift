@@ -65,8 +65,8 @@ public struct MossImageConfiguration: PackageConfiguration, ModelStorable, Quant
     /// loads per request and is released before the denoise loop.
     public var keepEncoderResident: Bool
     /// Qwen3.5-9B encoder tier, orthogonal to the DiT `quant`. `.int8` quantizes its Linears on load
-    /// (9.4 GB instead of 16.8 GB); it changes the activation peak, which `peakActivationBytesHint`
-    /// declares (MossImageFootprints.int8EncoderPeakActivationBytes).
+    /// (9.4 GB instead of 16.8 GB). It lowers the peak only below the 1456² cap, where the VAE decode is the
+    /// peak on every lane, so it declares no activation of its own (MossImageFootprints, AB-T-0317).
     public var textEncoderQuant: MossImageTextEncoderQuant
     public var modelsRootDirectory: URL?
 
@@ -114,11 +114,8 @@ public struct MossImageConfiguration: PackageConfiguration, ModelStorable, Quant
         modelsRootDirectory = nil
     }
 
-    /// The DiT tier keys the resident bytes (QuantFootprint); the encoder tier only moves the activation.
+    /// The DiT tier keys the footprint (QuantFootprint); the encoder tier doesn't move the cap peak (the decode).
     public var residentBytesHint: UInt64? { nil }
-    public var peakActivationBytesHint: UInt64? {
-        textEncoderQuant == .int8 ? MossImageFootprints.int8EncoderPeakActivationBytes : nil
-    }
 
     public var weightSources: [WeightSource] {
         [
