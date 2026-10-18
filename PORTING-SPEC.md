@@ -223,12 +223,44 @@ Pixel Agency Image Engine 0.2.13 (Release), built against a local mlx-image-runt
 - The int8 encoder still lowers the peak by 6.1 GB below the cap. Admission would see it only with per-size footprints
   or a lower cap.
 
+### 4.3 Row-band VAE decode (0.3.0)
+
+`MossImagePipeline.vaeTile` defaults to `.standard`: flux2-vae-mlx-swift ≥ 0.6.0's `decodePackedLatents(_:tile:)`
+(64 MB row bands, whole-tensor GroupNorm stats, one-row conv halo; AB-R-0577). `nil` decodes untiled. The banded path
+is generic over the decoder widths, so BFL's small decoder (96/192/384/384) runs on it unchanged.
+
+**Parity** (`MossImageGate vae` / `vae-tiled`, fp32, TF32 off):
+- Oracle golden (512×384), 1 MB bands: relL2 1.2e-6 on both conv routes (untiled: 3.6e-6 default, 1.2e-6 exact).
+- Tiled vs untiled, the golden latent tiled to size: default route 124.4 dB at 1024² and 124.6 dB at 1456² (relL2
+  5e-6, 99.99 % of 8-bit pixels identical). Exact route: 137.1 and 135.7 dB. No row stands out (worst-row maxAbs
+  4.6e-5 / 4.9e-5), so there are no seams.
+- MLX pool over the resident VAE: 1024² 7.13 → 1.63 GB, 1456² 14.39 → 2.89 GB; decode 0.68 → 1.00 s and
+  1.49 → 1.93 s.
+
+**membench** (pool, 2 steps): the 1456² decode drops 24.66 → 13.14 GB (bf16 DiT) and 19.99 → 8.47 GB (int8). The
+encode is now the peak at both sizes: 26.19 GB bf16/bf16, 15.42 GB int8/int8.
+
+**In-app** (Image Engine 0.2.13 clone, Release, against a local mlx-image-runtime on this tree; `run-lanes.sh`,
+TAGP v030, `quiet.sh` before each lane, no foreign Metal process):
+
+| Lane (DiT / encoder) | Resident | Peak 1024² | Peak 1456² (cap) | Declared 0.3.0 |
+|---|---|---|---|---|
+| bf16 / bf16 | 10.44 GB | 26.45 GB (encode) | 26.45 GB (encode) | 10.5 + 16.7 = 27.2 GB |
+| bf16 / int8 | 10.44 GB | 20.39 GB | 20.39 GB | 10.5 + 10.4 = 20.9 GB |
+| int8 / bf16 | 5.77 GB | 21.80 GB | 21.80 GB | 5.8 + 16.7 = 22.5 GB |
+| int8 / int8 | 5.77 GB | 15.73 GB | 15.73 GB | 5.8 + 10.4 = 16.2 GB |
+
+- The ledger peak doesn't rise during any 1456² run. The decode's 1 s samples read 14.4–14.8 GB (bf16 DiT) and
+  8.6–9.0 GB (int8), against 17.8 GB untiled (0.2.1).
+- Declared activation: the bf16 encoder 16.7 GB (16.03 + 3.6 %), quant-keyed; the int8 encoder 10.4 GB
+  (9.96 + 3.6 %), as `peakActivationBytesHint` again.
+- Renders vs 0.2.1: 60.9 / 64.5 dB (bf16/bf16, 1024² / 1456²), 61.1 / 64.5 dB (int8/int8), max |Δ| ≤ 4/255,
+  spread over every row (TF32 is on in production). Every string in both 1456² renders is exact.
+
 ## 5. Open
 
-- 16 GB Macs: the int8 / int8 lane declares 5.8 + 17.5 GB because the 1456² decode sets the activation.
-  Admitting a 16 GB Mac needs a ≤ 1024² envelope lane (or activation scaling that admission honours). A further ~1 GB would come from quantizing `embed_tokens`.
+- 16 GB Macs: the int8 / int8 lane declares 5.8 + 10.4 = 16.2 GB (0.3.0), over a 16 GB Mac's budget. A further ~1 GB
+  would come from quantizing `embed_tokens`; pre-quantized encoder weights would not move the peak.
 - Ship pre-quantized int8 encoder weights: that removes the 9–12 s per-request quantize and the 16.8 GB
   download.
-- A memory-bounded VAE decode (flux2-vae-mlx-swift ≥ 0.6.0 `decodePackedLatents(..., tile: .standard)`) would
-  take the cap peak under the encode peak; needs a parity check and an in-app re-measure.
 - Mirror and publish the weights; registry rows; in-app validation.

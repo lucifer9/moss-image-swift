@@ -3,11 +3,13 @@
 // test product's metallib is the fragile context).
 //
 //   MossImageGate sched | tok | vae [--cpu] | te [--dtype f32|bf16] [--quant-te int8] [--cpu]
+//                 vae-tiled [--sizes 1024x1024,1456x1456] [--route default|exact]
 //                 dit [--variant SFT|Base] [--dtype f32|bf16] [--cpu]
 //                 e2e [--variant SFT|Base] [--dtype f32|bf16] [--cpu]
 //                 generate --prompt "…" [--variant SFT|Base] [--size 1024x1024] [--steps 50]
 //                          [--cfg 3] [--seed 42] [--no-skip] [--quant int8] [--quant-te int8] [--out file.png]
-//                 membench [--variant SFT|Base] [--quant int8] [--quant-te int8] [--sizes 1024x1024,…]
+//                          [--untiled]
+//                 membench [--variant SFT|Base] [--quant int8] [--quant-te int8] [--sizes 1024x1024,…] [--untiled]
 // Paths: --weights <dir with MOSS-Image-SFT/ and MOSS-Image-Base/>, --goldens <oracle goldens dir>.
 
 import CoreGraphics
@@ -139,6 +141,55 @@ func runVAE() throws {
         let img = withDevice { clip(vae.decodePackedLatents(g["packed"]!), min: -1, max: 1) }
         gate("vae decode (\(route) conv route\(flag("--cpu") ? ", cpu" : ""))", compare(img[0], g["image"]!),
              relL2: 1e-2)
+        let tiled = withDevice {
+            clip(vae.decodePackedLatents(g["packed"]!, tile: MossImageVAETile(bandBytes: 1 << 20)), min: -1, max: 1)
+        }
+        gate("vae decode tiled, 1 MB bands (\(route) conv route)", compare(tiled[0], g["image"]!), relL2: 1e-2)
+        gate("vae decode tiled vs untiled (\(route) conv route)", compare(tiled, img), relL2: 1e-4)
+    }
+}
+
+/// Row-band vs untiled decode at product sizes. The latent is the oracle's real 512×384 packed latent tiled
+/// spatially and cropped to size/16 (a real latent distribution; FLUX.2 VAE has no positional input). Reports the
+/// relL2 / PSNR of the tiled image against the untiled one, the worst row (seams would show at band edges), the
+/// share of identical 8-bit pixels, and each path's MLX peak over the resident VAE.
+func runVAETiled() throws {
+    let sizes = (opt("--sizes") ?? "1024x1024,1456x1456").split(separator: ",").map {
+        $0.split(separator: "x").compactMap { Int($0) }
+    }
+    let g = try golden("shared", "vae")
+    let vae = try MossImageWeights.loadVAE(directory: sftSnapshot.appendingPathComponent("vae"))
+    if opt("--route") == "exact" { vae.convRoute = .conv3d }
+    let base = g["packed"]!  // [1, 128, 32, 24]
+    MLX.GPU.clearCache()
+    let resident = Double(MLX.GPU.activeMemory) / 1e9
+    for wh in sizes {
+        let (lh, lw) = (wh[1] / 16, wh[0] / 16)
+        let reps = [1, 1, (lh + base.dim(2) - 1) / base.dim(2), (lw + base.dim(3) - 1) / base.dim(3)]
+        let packed = tiled(base, repetitions: reps)[0..., 0..., ..<lh, ..<lw]
+        eval(packed)
+        func run(_ tile: MossImageVAETile?) -> (MLXArray, Double, Double) {
+            MLX.GPU.clearCache()
+            MLX.GPU.resetPeakMemory()
+            let t0 = Date()
+            let img = clip(tile.map { vae.decodePackedLatents(packed, tile: $0) } ?? vae.decodePackedLatents(packed),
+                           min: -1, max: 1)
+            eval(img)
+            return (img, Date().timeIntervalSince(t0), Double(MLX.GPU.peakMemory) / 1e9 - resident)
+        }
+        let (untiled, tu, pu) = run(nil)
+        let (banded, tt, pt) = run(.standard)
+        let s = compare(banded, untiled)
+        let d = banded - untiled
+        let mse = (d * d / 4).mean().item(Float.self)  // [-1, 1] → [0, 1]
+        let psnr = 10 * log10(1 / max(mse, 1e-30))
+        let worstRow = abs(d[0]).max(axes: [0, 2]).max().item(Float.self)
+        let a8 = MossImagePipeline.toRGB8(untiled).pixels, b8 = MossImagePipeline.toRGB8(banded).pixels
+        let same = Double(zip(a8, b8).filter { $0 == $1 }.count) / Double(a8.count)
+        gate(String(format: "vae tiled vs untiled %dx%d: PSNR %.1f dB, worst row maxAbs %.2e, 8-bit identical %.4f%%",
+                    wh[0], wh[1], psnr, worstRow, same * 100), s, relL2: 1e-4)
+        print(String(format: "      peak over resident: untiled %.2f GB (%.2fs), tiled %.2f GB (%.2fs)",
+                     pu, tu, pt, tt))
     }
 }
 
@@ -291,6 +342,7 @@ func runGenerate() async throws {
     let pipe = try await MossImagePipeline.load(
         transformerSnapshot: variantSnapshot, sharedSnapshot: sftSnapshot, dtype: modelDType, textEncoderQuant: teQuant)
     if let quantBits { MossImageWeights.quantizeTransformer(pipe.transformer, bits: quantBits) }
+    if flag("--untiled") { pipe.vaeTile = nil }
     log("loaded in \(String(format: "%.1fs", Date().timeIntervalSince(t0)))")
     let t1 = Date()
     let c = try pipe.encodeAndRelease(prompt: prompt, parameters: p)
@@ -346,14 +398,21 @@ func runMembench() async throws {
         let encodePeak = Double(MLX.GPU.peakMemory) / 1e9
         MLX.GPU.resetPeakMemory()
         let pipe = MossImagePipeline(transformer: transformer, promptEncoder: nil, vae: vae)
+        if flag("--untiled") { pipe.vaeTile = nil }
         let t0 = Date()
         let latents = try pipe.denoise(conditioning: c, parameters: p)
         let stepSecs = Date().timeIntervalSince(t0) / 2
+        MLX.GPU.clearCache()
+        let denoisePeak = Double(MLX.GPU.peakMemory) / 1e9
+        MLX.GPU.resetPeakMemory()
+        let t1 = Date()
         _ = pipe.decode(latents)
-        let peak = Double(MLX.GPU.peakMemory) / 1e9
-        let overall = max(peak, encodePeak)
-        print(String(format: "  %dx%d: peak %.2f GB (encode %.2f, denoise+decode %.2f), activation %.2f GB, %.2f s/step",
-                     wh[0], wh[1], overall, encodePeak, peak, overall - resident, stepSecs))
+        let decodeSecs = Date().timeIntervalSince(t1)
+        let decodePeak = Double(MLX.GPU.peakMemory) / 1e9
+        let overall = max(encodePeak, denoisePeak, decodePeak)
+        print(String(format: "  %dx%d %@: peak %.2f GB (encode %.2f, denoise %.2f, decode %.2f in %.2fs), activation %.2f GB, %.2f s/step",
+                     wh[0], wh[1], pipe.vaeTile == nil ? "untiled" : "tiled", overall, encodePeak, denoisePeak,
+                     decodePeak, decodeSecs, overall - resident, stepSecs))
         MLX.GPU.clearCache()
     }
 }
@@ -363,6 +422,7 @@ case "membench": try await runMembench()
 case "sched": try runSched()
 case "tok": try await runTok()
 case "vae": try runVAE()
+case "vae-tiled": try runVAETiled()
 case "te": try runTE()
 case "te-layers": try runTELayers()
 case "dit": try runDiT()

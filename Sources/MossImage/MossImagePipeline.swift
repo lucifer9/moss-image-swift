@@ -13,6 +13,8 @@ import MLXRandom
 
 /// The FLUX.2 VAE (small decoder), re-exported so wrappers need not import Flux2VAE.
 public typealias MossImageVAE = Flux2VAE
+/// The row-band decode setting (`MossImagePipeline.vaeTile`), re-exported likewise.
+public typealias MossImageVAETile = Flux2VAETile
 
 public struct MossImageGenerationParameters: Sendable {
     public var width = 1024
@@ -61,6 +63,10 @@ public final class MossImagePipeline {
     public let transformer: MossImageTransformer
     public private(set) var promptEncoder: MossImagePromptEncoder?
     public let vae: Flux2VAE
+    /// Row-band VAE decode (flux2-vae-mlx-swift ≥ 0.6.0): the same image up to float reassociation, no seams, with
+    /// the decode's peak bounded by one resnet's full-resolution tensors instead of their temporaries. `nil` decodes
+    /// untiled (the oracle gates' reference path).
+    public var vaeTile: Flux2VAETile? = .standard
 
     public init(transformer: MossImageTransformer, promptEncoder: MossImagePromptEncoder?, vae: Flux2VAE) {
         self.transformer = transformer
@@ -148,7 +154,9 @@ public final class MossImagePipeline {
 
     /// Packed latents → image [1, 3, H, W] in [-1, 1] (fp32).
     public func decode(_ latents: MLXArray) -> MLXArray {
-        let image = clip(vae.decodePackedLatents(latents.asType(.float32)), min: -1, max: 1)
+        let packed = latents.asType(.float32)
+        let decoded = vaeTile.map { vae.decodePackedLatents(packed, tile: $0) } ?? vae.decodePackedLatents(packed)
+        let image = clip(decoded, min: -1, max: 1)
         eval(image)
         return image
     }

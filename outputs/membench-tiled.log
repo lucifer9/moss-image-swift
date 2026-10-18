@@ -1,0 +1,28 @@
+GPU quiet (mem gate) for 30 s (waited 30 s); util=0 mem=278724608
+### membench  foreign=[]
+membench SFT bf16 te-bf16: resident 10.28 GB
+  encoder load 2.0s
+  1024x1024 tiled: peak 26.19 GB (encode 26.19, denoise 11.19, decode 11.89 in 0.88s), activation 15.92 GB, 2.18 s/step
+  encoder load 1.0s
+  1456x1456 tiled: peak 26.19 GB (encode 26.19, denoise 11.70, decode 13.14 in 1.81s), activation 15.92 GB, 5.04 s/step
+GPU quiet (mem gate) for 30 s (waited 30 s); util=0 mem=278724608
+### membench --untiled foreign=[]
+membench SFT bf16 te-bf16: resident 10.28 GB
+  encoder load 1.0s
+  1024x1024 untiled: peak 26.19 GB (encode 26.19, denoise 11.19, decode 17.40 in 0.70s), activation 15.92 GB, 2.17 s/step
+  encoder load 1.0s
+  1456x1456 untiled: peak 26.19 GB (encode 26.19, denoise 11.70, decode 24.66 in 1.56s), activation 15.92 GB, 5.06 s/step
+GPU quiet (mem gate) for 30 s (waited 31 s); util=0 mem=278855680
+### membench --quant int8 --quant-te int8 foreign=[]
+membench SFT int8 te-int8: resident 5.61 GB
+  encoder load 12.5s
+  1024x1024 tiled: peak 15.42 GB (encode 15.42, denoise 6.61, decode 7.22 in 1.04s), activation 9.81 GB, 2.45 s/step
+  encoder load 12.1s
+  1456x1456 tiled: peak 15.42 GB (encode 15.42, denoise 7.03, decode 8.47 in 1.80s), activation 9.81 GB, 5.37 s/step
+GPU quiet (mem gate) for 30 s (waited 31 s); util=0 mem=278724608
+### membench --quant int8 --quant-te int8 --untiled foreign=[]
+membench SFT int8 te-int8: resident 5.61 GB
+  encoder load 8.8s
+  1024x1024 untiled: peak 15.42 GB (encode 15.42, denoise 6.53, decode 12.73 in 0.70s), activation 9.81 GB, 2.32 s/step
+  encoder load 8.7s
+  1456x1456 untiled: peak 19.99 GB (encode 15.42, denoise 7.03, decode 19.99 in 1.52s), activation 14.39 GB, 5.34 s/step

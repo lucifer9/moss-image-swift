@@ -1,5 +1,25 @@
 // Declared memory footprints (efficiency contract 1.14.0 split: resident + peak activation).
 //
+// 0.3.0 (row-band VAE decode, flux2-vae-mlx-swift ≥ 0.6.0, AB-R-0577): the decode stops being the cap peak, so the
+// ENCODE is the peak on every lane at every size, and the encoder tier sets the activation again. In-app phys_footprint
+// (Pixel Agency Image Engine, Release, against this tree; WIP/moss-image-inapp/run-lanes.sh, TAGP v030):
+//
+//   lane (in-app phys)      resident   peak 1024²          peak 1456² (cap)    declared 0.3.0
+//   bf16 DiT + bf16 TE      10.44 GB   26.45 GB (encode)   26.45 GB (encode)   10.5 + 16.7 = 27.2 GB
+//   bf16 DiT + int8 TE      10.44 GB   20.39 GB (encode)   20.39 GB (encode)   10.5 + 10.4 = 20.9 GB
+//   int8 DiT + bf16 TE       5.77 GB   21.80 GB (encode)   21.80 GB (encode)    5.8 + 16.7 = 22.5 GB
+//   int8 DiT + int8 TE       5.77 GB   15.73 GB (encode)   15.73 GB (encode)    5.8 + 10.4 = 16.2 GB
+//
+// - bf16 encoder: 16.03 GB over resident (int8 DiT; 16.01 on bf16) + 3.6 % = 16.61 → 16.7 GB, the quant-keyed
+//   `peakActivationBytes`.
+// - int8 encoder: 9.96 GB over resident (9.95 on bf16) + 3.6 % = 10.32 → 10.4 GB, the `peakActivationBytesHint`.
+// - The 1456² decode no longer moves the ledger peak on any lane; its 1 s samples read 14.4–14.8 GB (bf16 DiT) and
+//   8.6–9.0 GB (int8 DiT), against 17.8 GB untiled. MLX pool (membench): the 1456² decode is 2.86 GB over resident,
+//   down from 14.38 GB.
+// - A 24 GB Mac's ~19 GB budget now admits int8/int8 (16.2 GB declared; it was 23.3).
+//
+// Superseded history follows.
+//
 // 0.2.1 (AB-T-0317, in-app AB-R-0575): declared activation 17.5 GB on EVERY lane, from the Pixel Agency Image
 // Engine's phys_footprint, not the MLX pool. At the 1456² cap the per-request peak is the VAE decode, 16.84 GB over
 // resident on both DiT tiers and with either encoder (the decode doesn't see the encoder): 27.28 GB phys on the bf16
@@ -58,8 +78,11 @@
 import MLXToolKit
 
 enum MossImageFootprints {
+    /// The bf16 encoder's activation on either DiT tier.
     static let declared: [QuantFootprint] = [
-        QuantFootprint(quant: .bf16, residentBytes: 10_500_000_000, peakActivationBytes: 17_500_000_000),
-        QuantFootprint(quant: .int8, residentBytes: 5_800_000_000, peakActivationBytes: 17_500_000_000),
+        QuantFootprint(quant: .bf16, residentBytes: 10_500_000_000, peakActivationBytes: 16_700_000_000),
+        QuantFootprint(quant: .int8, residentBytes: 5_800_000_000, peakActivationBytes: 16_700_000_000),
     ]
+    /// The int8 encoder's activation on either DiT tier (`MossImageConfiguration.peakActivationBytesHint`).
+    static let int8EncoderPeakActivationBytes: UInt64 = 10_400_000_000
 }

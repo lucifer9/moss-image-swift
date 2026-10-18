@@ -24,8 +24,9 @@ let package = Package(
         // MLXLMCommon.gatedDeltaUpdate (the GDN Metal kernel) for the Qwen3.5 encoder.
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.32.3"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.3"),
-        // ≥ 0.4.0 reads the decoder widths from vae/config.json — the FLUX.2 small decoder.
-        .package(url: "https://github.com/xocialize/flux2-vae-mlx-swift", from: "0.4.0"),
+        // ≥ 0.4.0 reads the decoder widths from vae/config.json — the FLUX.2 small decoder; ≥ 0.6.0 adds the
+        // memory-bounded row-band decode (`decodePackedLatents(_:tile:)`, AB-R-0577).
+        .package(url: "https://github.com/xocialize/flux2-vae-mlx-swift", from: "0.6.0"),
         // MLXEngine contract (MLXToolKit) + conformance gates, for the wrapper only.
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.65.4"),
     ],
