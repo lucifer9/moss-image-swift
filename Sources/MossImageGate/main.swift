@@ -2,7 +2,8 @@
 // goldens, fp32 CPU torch) and real generations. Every Metal-context gate is a CLI mode (the SPM
 // test product's metallib is the fragile context).
 //
-//   MossImageGate sched | tok | vae [--cpu] | te [--dtype f32|bf16] [--quant-te int8] [--cpu]
+//   MossImageGate smoke (GPU and bundled Metal resources; no model weights needed)
+//                 sched | tok | vae [--cpu] | te [--dtype f32|bf16] [--quant-te int8] [--cpu]
 //                 vae-tiled [--sizes 1024x1024,1456x1456] [--route default|exact]
 //                 dit [--variant SFT|Base] [--dtype f32|bf16] [--cpu]
 //                 e2e [--variant SFT|Base] [--dtype f32|bf16] [--cpu]
@@ -98,6 +99,20 @@ func writePNG(_ rgb: (pixels: [UInt8], width: Int, height: Int), to url: URL) th
 let promptNames = ["cat", "empty", "note", "layout"]
 
 // MARK: - modes
+
+func runSmoke() throws {
+    try Device.withDefaultDevice(.gpu) {
+        for dtype: DType in [.float32, .bfloat16] {
+            let a = MLXArray.ones([32, 32]).asType(dtype)
+            let result = matmul(a, a).asType(.float32)
+            let error = abs(result - 32).max().item(Float.self)
+            guard error == 0 else {
+                throw MossImageError.invalidInput("GPU smoke failed for \(dtype): error \(error)")
+            }
+            print("PASS GPU matmul \(dtype): Metal resources loaded")
+        }
+    }
+}
 
 func runSched() throws {
     let g = try golden("shared", "sched")
@@ -418,6 +433,7 @@ func runMembench() async throws {
 }
 
 switch mode {
+case "smoke": try runSmoke()
 case "membench": try await runMembench()
 case "sched": try runSched()
 case "tok": try await runTok()
@@ -429,7 +445,7 @@ case "dit": try runDiT()
 case "e2e": try runE2E()
 case "generate": try await runGenerate()
 default:
-    print("modes: sched | tok | vae | te | dit | e2e | generate (see header)")
+    print("modes: smoke | sched | tok | vae | te | dit | e2e | generate (see header)")
 }
 if failures > 0 {
     print("\(failures) gate(s) FAILED")

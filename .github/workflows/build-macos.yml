@@ -1,0 +1,88 @@
+name: Build macOS arm64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-macos.yml'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          swift --version
+          if ! xcrun --find metal; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun --find metal
+      - name: Build executable and Metal resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -scheme MossImageGate \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/moss-build" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/moss-packages" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            MACOSX_DEPLOYMENT_TARGET=26.0 CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Package standalone runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          products="$RUNNER_TEMP/moss-build/Build/Products/Release"
+          output="$RUNNER_TEMP/moss-macos-arm64"
+          mkdir -p "$output"
+          cp "$products/MossImageGate" "$output/"
+          while IFS= read -r -d '' resource; do
+            cp -R "$resource" "$output/"
+          done < <(find "$products" -maxdepth 1 \( -name '*.bundle' -o -name '*.dylib' -o -name '*.framework' -o -name '*.metallib' \) -print0)
+          test -n "$(find "$output" -name '*.metallib' -print -quit)"
+          file "$output/MossImageGate"
+          otool -L "$output/MossImageGate" | tee "$output/linkage.txt"
+          cp LICENSE "$output/LICENSE"
+          {
+            echo "Source: https://github.com/$GITHUB_REPOSITORY"
+            echo "Commit: $GITHUB_SHA"
+            xcodebuild -version
+            swift --version
+          } > "$output/build-info.txt"
+          cp Package.resolved "$output/Package.resolved"
+          # Test relocation without downloading weights. GPU execution is checked on the user's Mac.
+          (cd "$output" && ./MossImageGate help)
+          tar -czf "$RUNNER_TEMP/moss-macos-arm64.tar.gz" -C "$RUNNER_TEMP" moss-macos-arm64
+          (cd "$RUNNER_TEMP" && shasum -a 256 moss-macos-arm64.tar.gz > moss-macos-arm64.tar.gz.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moss-macos-arm64
+          path: |
+            ${{ runner.temp }}/moss-macos-arm64.tar.gz
+            ${{ runner.temp }}/moss-macos-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: warn
+          retention-days: 7
